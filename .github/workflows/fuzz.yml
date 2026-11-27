@@ -4,8 +4,6 @@ name: Fuzz
 # required check: a finding shows up as a failed run in the Actions tab.
 
 on:
-  push:
-    branches: [ci/nightly-fuzz]
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
