@@ -518,6 +518,7 @@ impl<'a> Parser<'a> {
             entries.push(self.entry_from_record(index, record, cd, cd_offset));
         }
         self.check_names(&entries);
+        self.check_dex_sequence(&entries);
         if directory.entries > 0 {
             self.check_prefix(&entries, cd_offset);
         }
@@ -1003,6 +1004,35 @@ impl<'a> Parser<'a> {
             self.entry(index, AnomalyKind::DataOutOfRange);
         }
         entry.data_offset = Some(data_offset);
+    }
+
+    /// ART (`DexFileLoader::Open`) looks up `classes.dex`, `classes2.dex` and
+    /// so on by exact name, and stops at the first one that is not found: the
+    /// DEX entries numbered after it are never loaded, without any error.
+    fn check_dex_sequence(&mut self, entries: &[Entry]) {
+        let dex: Vec<(usize, Option<u64>)> = entries
+            .iter()
+            .filter(|entry| entry.component == Component::Dex)
+            .map(|entry| (entry.index, component::dex_number(&entry.name)))
+            .collect();
+        let mut present: Vec<u64> = dex.iter().filter_map(|&(_, number)| number).collect();
+        present.sort_unstable();
+        present.dedup();
+        let mut missing: u64 = 1;
+        for number in present {
+            if number != missing {
+                break;
+            }
+            match missing.checked_add(1) {
+                Some(next) => missing = next,
+                None => return,
+            }
+        }
+        for (index, number) in dex {
+            if number.is_none_or(|number| number > missing) {
+                self.entry(index, AnomalyKind::DexUnreachable { missing });
+            }
+        }
     }
 
     fn check_names(&mut self, entries: &[Entry]) {

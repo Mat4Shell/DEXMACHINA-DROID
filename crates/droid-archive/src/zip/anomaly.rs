@@ -208,6 +208,16 @@ pub enum AnomalyKind {
     Backslash,
     /// The entry is a Unix symbolic link.
     Symlink,
+    /// A DEX entry that ART never loads: ART opens `classes.dex`, then
+    /// `classes2.dex`, `classes3.dex` and so on, and stops at the first name
+    /// that is missing from the archive. Build tools number DEX files without
+    /// gaps; code placed after a gap is invisible to the application's class
+    /// loader but not to tools that read every DEX file.
+    DexUnreachable {
+        /// Position of the first missing name in ART's loading order: 1 for
+        /// `classes.dex`, `N` for `classesN.dex`.
+        missing: u64,
+    },
     /// The local header offset is at or past the central directory. Android
     /// refuses the archive.
     LocalHeaderOutOfRange,
@@ -339,6 +349,7 @@ impl AnomalyKind {
             Self::UnsupportedMethod { .. } => "zip.entry.unsupported_method",
             Self::StoredSizeMismatch => "zip.entry.stored_size_mismatch",
             Self::Overlap { .. } => "zip.entry.overlap",
+            Self::DexUnreachable { .. } => "zip.entry.dex_unreachable",
             Self::CrcMismatch { .. } => "zip.entry.crc_mismatch",
             Self::DataDescriptorMismatch => "zip.entry.data_descriptor_mismatch",
             Self::DataDescriptorUnreadable => "zip.entry.data_descriptor_unreadable",
@@ -416,7 +427,8 @@ impl AnomalyKind {
             | Self::AbsolutePath
             | Self::Backslash
             | Self::Symlink
-            | Self::Overlap { .. } => Impact::Suspicious,
+            | Self::Overlap { .. }
+            | Self::DexUnreachable { .. } => Impact::Suspicious,
             Self::EocdComment { .. } | Self::CaseCollision { .. } => Impact::Informational,
         }
     }
@@ -545,6 +557,11 @@ impl fmt::Display for AnomalyKind {
                 f.write_str("stored entry with different compressed and uncompressed sizes")
             }
             Self::Overlap { other } => write!(f, "bytes overlap entry {other}"),
+            Self::DexUnreachable { missing } => write!(
+                f,
+                "never loaded by ART, which stops at the missing {}",
+                super::component::dex_name(*missing)
+            ),
             Self::CrcMismatch { declared, actual } => {
                 write!(f, "CRC-32 {actual:#010x}, declared {declared:#010x}")
             }

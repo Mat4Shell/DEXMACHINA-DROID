@@ -73,6 +73,33 @@ fn is_dex_name(name: &[u8]) -> bool {
     }
 }
 
+/// Position of a DEX entry in ART's loading order: 1 for `classes.dex`, `N`
+/// for `classesN.dex`. `None` when the name is not one that ART loads, or
+/// when its number does not fit in a `u64`.
+pub(crate) fn dex_number(name: &[u8]) -> Option<u64> {
+    if !is_dex_name(name) {
+        return None;
+    }
+    let digits = name.strip_prefix(b"classes")?.strip_suffix(b".dex")?;
+    if digits.is_empty() {
+        return Some(1);
+    }
+    digits.iter().try_fold(0u64, |number, &digit| {
+        number
+            .checked_mul(10)?
+            .checked_add(u64::from(digit.checked_sub(b'0')?))
+    })
+}
+
+/// The name of the DEX entry at this position in ART's loading order.
+pub(crate) fn dex_name(number: u64) -> String {
+    if number == 1 {
+        "classes.dex".to_string()
+    } else {
+        format!("classes{number}.dex")
+    }
+}
+
 /// The installer only considers `lib/<abi>/<file>`, with no subdirectory.
 fn is_native_library_name(name: &[u8]) -> bool {
     let Some(rest) = name.strip_prefix(b"lib/") else {
@@ -102,7 +129,7 @@ fn is_jar_signature_name(name: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Component;
+    use super::{Component, dex_name, dex_number};
 
     #[test]
     fn classifies_entries() {
@@ -130,5 +157,29 @@ mod tests {
                 String::from_utf8_lossy(name)
             );
         }
+    }
+
+    #[test]
+    fn numbers_dex_entries_in_loading_order() {
+        let cases: [(&[u8], Option<u64>); 8] = [
+            (b"classes.dex", Some(1)),
+            (b"classes2.dex", Some(2)),
+            (b"classes10.dex", Some(10)),
+            (b"classes18446744073709551615.dex", Some(u64::MAX)),
+            (b"classes18446744073709551616.dex", None),
+            (b"classes1.dex", None),
+            (b"classes02.dex", None),
+            (b"assets/classes2.dex", None),
+        ];
+        for (name, number) in cases {
+            assert_eq!(
+                dex_number(name),
+                number,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        assert_eq!(dex_name(1), "classes.dex");
+        assert_eq!(dex_name(3), "classes3.dex");
     }
 }
