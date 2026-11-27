@@ -10,7 +10,8 @@ mod support;
 
 use droid_archive::Limits;
 use droid_archive::zip::{
-    Anomaly, AnomalyKind, Component, Impact, LimitKind, LocalField, ReadError, ZipArchive, ZipError,
+    Anomaly, AnomalyKind, Component, Impact, LONG_NAME_COMPONENT_LEN, LONG_NAME_LEN, LimitKind,
+    LocalField, ReadError, ZipArchive, ZipError,
 };
 use support::{
     EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, signing_block,
@@ -811,7 +812,7 @@ fn overlapping_entries() {
 }
 
 #[test]
-fn entry_count_and_name_limits() {
+fn blocking_limits_at_open() {
     let data = sample().build();
     let limits = Limits {
         max_entries: 3,
@@ -825,17 +826,76 @@ fn entry_count_and_name_limits() {
             max: 3
         })
     );
+    let cd_size = parse(&data).layout().central_directory_size;
     let limits = Limits {
-        max_name_len: 8,
+        max_central_directory_size: cd_size - 1,
         ..Limits::default()
     };
-    assert!(matches!(
-        ZipArchive::parse(&data, limits),
-        Err(ZipError::LimitExceeded {
-            limit: LimitKind::NameLength,
-            ..
+    assert_eq!(
+        ZipArchive::parse(&data, limits).err(),
+        Some(ZipError::LimitExceeded {
+            limit: LimitKind::CentralDirectorySize,
+            value: cd_size,
+            max: cd_size - 1
         })
-    ));
+    );
+}
+
+#[test]
+fn long_names_are_reported_not_refused() {
+    let longest = "a".repeat(65_535);
+    let long_path = format!("lib/arm64-v8a/{}", "x/".repeat(2100));
+    let long_component = format!("assets/{}.bin", "b".repeat(300));
+    let names = [
+        "res/raw/".to_string() + &"c".repeat(200),
+        long_path.clone(),
+        long_component.clone(),
+        longest.clone(),
+    ];
+    let mut builder = ZipBuilder::new();
+    for name in &names {
+        builder = builder.entry(EntrySpec::stored(name, b"x"));
+    }
+    let data = builder.build();
+    let archive = parse(&data);
+
+    assert!(!has(&archive, "zip.entry.long_name", Some(0)));
+    let found = find(archive.anomalies(), "zip.entry.long_name");
+    let reported: Vec<_> = found.iter().map(|a| (a.entry, a.kind.clone())).collect();
+    assert_eq!(
+        reported,
+        [
+            (
+                Some(1),
+                AnomalyKind::LongName {
+                    len: u64::try_from(long_path.len()).unwrap(),
+                    longest_component: 9
+                }
+            ),
+            (
+                Some(2),
+                AnomalyKind::LongName {
+                    len: u64::try_from(long_component.len()).unwrap(),
+                    longest_component: 304
+                }
+            ),
+            (
+                Some(3),
+                AnomalyKind::LongName {
+                    len: 65_535,
+                    longest_component: 65_535
+                }
+            ),
+        ]
+    );
+    assert!(found.iter().all(|a| a.impact() == Impact::Suspicious));
+    assert!(archive.android_accepts());
+    for index in 0..names.len() {
+        assert_eq!(archive.read(index).unwrap().data, b"x");
+    }
+    assert_eq!(archive.entries()[3].name.len(), 65_535);
+    assert_eq!(LONG_NAME_LEN, 4096);
+    assert_eq!(LONG_NAME_COMPONENT_LEN, 255);
 }
 
 #[test]

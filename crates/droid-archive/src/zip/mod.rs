@@ -53,6 +53,16 @@ const FLAG_ENCRYPTED: u16 = 0x0001;
 const FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
 const FLAG_STRONG_ENCRYPTION: u16 = 0x0040;
 
+/// Names of at least this many bytes are reported as
+/// [`AnomalyKind::LongName`]. It is `PATH_MAX` on Linux: Android's native
+/// library installer copies entry names into a buffer of that size and skips
+/// the entries whose name does not fit.
+pub const LONG_NAME_LEN: usize = 4096;
+/// Names with a path component longer than this many bytes are reported as
+/// [`AnomalyKind::LongName`]. It is `NAME_MAX` on Linux: no file system path
+/// component can be longer.
+pub const LONG_NAME_COMPONENT_LEN: usize = 255;
+
 /// Compression method: no compression.
 pub const METHOD_STORED: u16 = 0;
 /// Compression method: raw deflate.
@@ -470,6 +480,13 @@ impl<'a> Parser<'a> {
                 max: self.limits.max_entries,
             });
         }
+        if directory.size > self.limits.max_central_directory_size {
+            return Err(ZipError::LimitExceeded {
+                limit: LimitKind::CentralDirectorySize,
+                value: directory.size,
+                max: self.limits.max_central_directory_size,
+            });
+        }
         if directory.entries == 0 {
             self.archive(AnomalyKind::EmptyArchive);
         }
@@ -681,13 +698,6 @@ impl<'a> Parser<'a> {
                 local_header_offset: local_offset32,
             } = RawCentral::parse(header).ok_or(truncated)?;
 
-            if usize::from(name_len) > self.limits.max_name_len {
-                return Err(ZipError::LimitExceeded {
-                    limit: LimitKind::NameLength,
-                    value: u64::from(name_len),
-                    max: u64::try_from(self.limits.max_name_len).unwrap_or(u64::MAX),
-                });
-            }
             let name_start = pos.checked_add(CENTRAL_HEADER_LEN).ok_or(truncated)?;
             let name_end = name_start
                 .checked_add(u64::from(name_len))
@@ -1014,6 +1024,16 @@ impl<'a> Parser<'a> {
             }
             if name.is_empty() {
                 self.entry(index, AnomalyKind::EmptyName);
+            }
+            let longest_component = names::longest_component(name);
+            if name.len() >= LONG_NAME_LEN || longest_component > LONG_NAME_COMPONENT_LEN {
+                self.entry(
+                    index,
+                    AnomalyKind::LongName {
+                        len: u64::try_from(name.len()).unwrap_or(u64::MAX),
+                        longest_component: u64::try_from(longest_component).unwrap_or(u64::MAX),
+                    },
+                );
             }
             if names::is_valid_for_android(name) && std::str::from_utf8(name).is_err() {
                 self.entry(index, AnomalyKind::NameNotStrictUtf8);

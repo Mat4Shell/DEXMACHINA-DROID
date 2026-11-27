@@ -11,8 +11,8 @@ use std::fmt;
 pub enum LimitKind {
     /// [`Limits::max_entries`](crate::Limits::max_entries).
     Entries,
-    /// [`Limits::max_name_len`](crate::Limits::max_name_len).
-    NameLength,
+    /// [`Limits::max_central_directory_size`](crate::Limits::max_central_directory_size).
+    CentralDirectorySize,
     /// [`Limits::max_entry_size`](crate::Limits::max_entry_size).
     EntrySize,
     /// [`Limits::max_total_size`](crate::Limits::max_total_size).
@@ -82,7 +82,7 @@ impl ZipError {
 const fn limit_code(limit: LimitKind) -> &'static str {
     match limit {
         LimitKind::Entries => "zip.limit.entries",
-        LimitKind::NameLength => "zip.limit.name_length",
+        LimitKind::CentralDirectorySize => "zip.limit.central_directory_size",
         LimitKind::EntrySize => "zip.limit.entry_size",
         LimitKind::TotalSize => "zip.limit.total_size",
         LimitKind::CompressionRatio => "zip.limit.compression_ratio",
@@ -119,7 +119,7 @@ impl Error for ZipError {}
 const fn limit_name(limit: LimitKind) -> &'static str {
     match limit {
         LimitKind::Entries => "entry count",
-        LimitKind::NameLength => "entry name length",
+        LimitKind::CentralDirectorySize => "central directory size",
         LimitKind::EntrySize => "entry size",
         LimitKind::TotalSize => "total uncompressed size",
         LimitKind::CompressionRatio => "compression ratio",

@@ -189,6 +189,17 @@ pub enum AnomalyKind {
     NameNotStrictUtf8,
     /// The entry has an empty name.
     EmptyName,
+    /// The name is at least [`LONG_NAME_LEN`](super::LONG_NAME_LEN) bytes
+    /// long, or one of its path components is longer than
+    /// [`LONG_NAME_COMPONENT_LEN`](super::LONG_NAME_COMPONENT_LEN) bytes.
+    /// Android's native library installer skips such names, and no file system
+    /// can hold them.
+    LongName {
+        /// Length of the name, in bytes.
+        len: u64,
+        /// Length of its longest path component, in bytes.
+        longest_component: u64,
+    },
     /// The name contains a `..` path component.
     PathTraversal,
     /// The name is an absolute path (leading `/` or `\`, or a drive letter).
@@ -309,6 +320,7 @@ impl AnomalyKind {
             Self::InvalidName => "zip.entry.invalid_name",
             Self::NameNotStrictUtf8 => "zip.entry.name_not_utf8",
             Self::EmptyName => "zip.entry.empty_name",
+            Self::LongName { .. } => "zip.entry.long_name",
             Self::PathTraversal => "zip.entry.path_traversal",
             Self::AbsolutePath => "zip.entry.absolute_path",
             Self::Backslash => "zip.entry.backslash",
@@ -399,6 +411,7 @@ impl AnomalyKind {
             | Self::CentralDirectoryGap { .. }
             | Self::SigningBlockMalformed
             | Self::EmptyName
+            | Self::LongName { .. }
             | Self::PathTraversal
             | Self::AbsolutePath
             | Self::Backslash
@@ -478,6 +491,13 @@ impl fmt::Display for AnomalyKind {
             Self::InvalidName => f.write_str("name contains NUL or is not UTF-8"),
             Self::NameNotStrictUtf8 => f.write_str("name is not strictly valid UTF-8"),
             Self::EmptyName => f.write_str("empty name"),
+            Self::LongName {
+                len,
+                longest_component,
+            } => write!(
+                f,
+                "name of {len} bytes, longest path component of {longest_component} bytes"
+            ),
             Self::PathTraversal => f.write_str("name contains a `..` component"),
             Self::AbsolutePath => f.write_str("name is an absolute path"),
             Self::Backslash => f.write_str("name contains a backslash"),

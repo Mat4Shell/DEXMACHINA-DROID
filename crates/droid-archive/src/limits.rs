@@ -6,13 +6,18 @@
 /// Upper bounds on the resources an archive may consume.
 ///
 /// Every limit is checked against values declared by the archive before any
-/// work is done, then enforced again on what is actually produced.
+/// work is done, then enforced again on what is actually produced. Only the
+/// number of entries and the size of the central directory prevent an archive
+/// from being opened; the other limits apply to reading one entry. Entry names
+/// are not limited, since the format bounds them to 65535 bytes: unusually
+/// long names are reported as anomalies instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum number of entries declared by the central directory.
     pub max_entries: u64,
-    /// Maximum length of an entry name, in bytes.
-    pub max_name_len: usize,
+    /// Maximum size of the central directory, in bytes. It bounds the memory
+    /// used to hold entry names, whatever the size of the input.
+    pub max_central_directory_size: u64,
     /// Maximum uncompressed size of a single entry, in bytes.
     pub max_entry_size: u64,
     /// Maximum number of uncompressed bytes produced by all reads from one
@@ -31,7 +36,7 @@ impl Limits {
     /// Default limits, sized for real-world Android applications.
     pub const DEFAULT: Self = Self {
         max_entries: 100_000,
-        max_name_len: 4096,
+        max_central_directory_size: 64 * 1024 * 1024,
         max_entry_size: 512 * 1024 * 1024,
         max_total_size: 4 * 1024 * 1024 * 1024,
         max_compression_ratio: 200,

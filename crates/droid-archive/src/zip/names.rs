@@ -39,6 +39,14 @@ pub(crate) fn has_parent_component(name: &[u8]) -> bool {
         .any(|component| component == b"..")
 }
 
+/// Length of the longest path component, with `/` or `\` as separators.
+pub(crate) fn longest_component(name: &[u8]) -> usize {
+    name.split(|&b| b == b'/' || b == b'\\')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or_default()
+}
+
 /// Whether the name is absolute on Unix or on Windows.
 pub(crate) fn is_absolute(name: &[u8]) -> bool {
     match name {
@@ -84,5 +92,12 @@ mod tests {
         assert!(is_absolute(b"c:x"));
         assert!(!is_absolute(b"assets/a:b"));
         assert!(!is_absolute(b""));
+    }
+
+    #[test]
+    fn measures_components() {
+        assert_eq!(longest_component(b""), 0);
+        assert_eq!(longest_component(b"res/layout/main.xml"), 8);
+        assert_eq!(longest_component(b"a\\bbbb/cc"), 4);
     }
 }
