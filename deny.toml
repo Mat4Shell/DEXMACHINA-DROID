@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Mathias EMON (Mat4Shell)
+
+# Configuration for cargo-deny: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerability and unsoundness advisories from the RustSec database always
+# fail the check. Unmaintained crates fail it too, anywhere in the graph.
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Must stay identical to the project's list of allowed dependency licenses, and
+# to the `allow-licenses` input of the Dependency Review workflow.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+unused-allowed-license = "allow"
+
+[licenses.private]
+# The workspace crates are AGPL-3.0-or-later and never published; only third
+# party crates are checked against the list above.
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
