@@ -1,0 +1,13 @@
+# ZIP structure signatures and magic values.
+local="PK\x03\x04"
+central="PK\x01\x02"
+eocd="PK\x05\x06"
+zip64_eocd="PK\x06\x06"
+zip64_locator="PK\x06\x07"
+data_descriptor="PK\x07\x08"
+zip64_extra="\x01\x00"
+max16="\xff\xff"
+max32="\xff\xff\xff\xff"
+signing_block="APK Sig Block 42"
+manifest="AndroidManifest.xml"
+parent="../"
