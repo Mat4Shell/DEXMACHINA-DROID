@@ -46,6 +46,8 @@ jobs:
       MAX_LEN: ${{ matrix.max_len }}
       FUZZ_DIR: crates/${{ matrix.crate }}/fuzz
       FUZZ_SECONDS: ${{ inputs.seconds || 1500 }}
+      ARTIFACT_NAME: fuzz-failing-inputs-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      ARTIFACT_RETENTION_DAYS: 7
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,6 +124,8 @@ jobs:
             echo
             echo "Decode one with \`base64 -d > input\`, then reproduce it with"
             echo "\`cargo +$FUZZ_TOOLCHAIN fuzz run $TARGET input\` from \`$FUZZ_DIR\`."
+            echo "The same files are attached to this run as the artifact"
+            echo "\`$ARTIFACT_NAME\`, kept for $ARTIFACT_RETENTION_DAYS days."
           } >> "$GITHUB_STEP_SUMMARY"
           for input in "${inputs[@]}"; do
             name=$(basename "$input")
@@ -138,3 +142,12 @@ jobs:
               echo "</details>"
             } >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: Upload the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.FUZZ_DIR }}/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
