@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use super::component::Component;
+
 /// What an anomaly means for an Android device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Impact {
@@ -244,9 +246,10 @@ pub enum AnomalyKind {
         /// Whether the strong encryption flag is set too.
         strong: bool,
     },
-    /// The compression method is neither stored nor deflate. Android's
-    /// resource loader reads such an entry as stored, its extraction routines
-    /// fail, and general-purpose readers reject it.
+    /// The compression method is neither stored nor deflate. The resource
+    /// loader reads such an entry as stored, ART and the native library
+    /// installer fail to extract it, the JAR signature verifier inflates it,
+    /// and general-purpose readers reject it.
     UnsupportedMethod {
         /// The declared method.
         method: u16,
@@ -267,8 +270,9 @@ pub enum AnomalyKind {
         /// CRC-32 of the content.
         actual: u32,
     },
-    /// The data descriptor disagrees with the central directory. Android's
-    /// extraction routines fail.
+    /// The data descriptor disagrees with the central directory. The ZIP
+    /// library's extraction fails (ART, native libraries); the resource loader
+    /// and the JAR signature verifier do not check it.
     DataDescriptorMismatch,
     /// The data descriptor announced by the local header cannot be read.
     DataDescriptorUnreadable,
@@ -330,8 +334,20 @@ impl AnomalyKind {
         }
     }
 
-    /// What the anomaly means for an Android device.
-    pub const fn impact(&self) -> Impact {
+    /// What the anomaly means for an Android device, when the given
+    /// component reads the entry. `None` stands for the ZIP library that all
+    /// components share, which is the only reader of the archive structure.
+    pub const fn impact_in(&self, component: Option<Component>) -> Impact {
+        match (self, component) {
+            (Self::UnsupportedMethod { .. }, Some(Component::Dex | Component::NativeLibraries)) => {
+                return Impact::EntryRejected;
+            }
+            (
+                Self::DataDescriptorMismatch | Self::DataDescriptorUnreadable,
+                Some(Component::Resources | Component::JarSignature),
+            ) => return Impact::Divergence,
+            _ => {}
+        }
         match self {
             Self::EocdLengthMismatch { .. }
             | Self::Zip64LocatorMissing
@@ -531,17 +547,36 @@ pub struct Anomaly {
     /// Index of the entry concerned, in central directory order, or `None`
     /// for the whole archive.
     pub entry: Option<usize>,
+    /// The Android component whose reaction [`impact`](Self::impact)
+    /// describes. For an entry, it is the component that reads that kind of
+    /// entry; when another component reacts differently, the anomaly is
+    /// reported once more for it. `None` stands for the ZIP library shared by
+    /// all components.
+    pub component: Option<Component>,
 }
 
 impl Anomaly {
     pub(crate) const fn archive(kind: AnomalyKind) -> Self {
-        Self { kind, entry: None }
+        Self {
+            kind,
+            entry: None,
+            component: None,
+        }
     }
 
-    pub(crate) const fn entry(index: usize, kind: AnomalyKind) -> Self {
+    pub(crate) const fn archive_in(component: Component, kind: AnomalyKind) -> Self {
+        Self {
+            kind,
+            entry: None,
+            component: Some(component),
+        }
+    }
+
+    pub(crate) const fn entry(index: usize, component: Component, kind: AnomalyKind) -> Self {
         Self {
             kind,
             entry: Some(index),
+            component: Some(component),
         }
     }
 
@@ -550,17 +585,22 @@ impl Anomaly {
         self.kind.code()
     }
 
-    /// What the anomaly means for an Android device.
+    /// What the anomaly means for an Android device, as seen by
+    /// [`component`](Self::component).
     pub const fn impact(&self) -> Impact {
-        self.kind.impact()
+        self.kind.impact_in(self.component)
     }
 }
 
 impl fmt::Display for Anomaly {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.entry {
-            Some(index) => write!(f, "[{}] entry {index}: {}", self.code(), self.kind),
-            None => write!(f, "[{}] {}", self.code(), self.kind),
+        write!(f, "[{}] ", self.code())?;
+        if let Some(index) = self.entry {
+            write!(f, "entry {index}: ")?;
         }
+        if let Some(component) = self.component {
+            write!(f, "({}) ", component.code())?;
+        }
+        write!(f, "{}", self.kind)
     }
 }

@@ -52,6 +52,7 @@ pub(crate) fn read_entry(
         if unused > 0 {
             anomalies.push(Anomaly::entry(
                 entry.index,
+                entry.component,
                 AnomalyKind::DeflateTrailingData { len: unused },
             ));
         }
@@ -73,6 +74,7 @@ pub(crate) fn read_entry(
     if actual != entry.crc32 {
         anomalies.push(Anomaly::entry(
             entry.index,
+            entry.component,
             AnomalyKind::CrcMismatch {
                 declared: entry.crc32,
                 actual,
@@ -82,7 +84,7 @@ pub(crate) fn read_entry(
     if entry.has_data_descriptor
         && let Some(kind) = check_data_descriptor(data, entry, data_offset)
     {
-        anomalies.push(Anomaly::entry(entry.index, kind));
+        anomalies.push(Anomaly::entry(entry.index, entry.component, kind));
     }
     Ok(EntryContent {
         data: content,

@@ -10,7 +10,7 @@ mod support;
 
 use droid_archive::Limits;
 use droid_archive::zip::{
-    Anomaly, AnomalyKind, Impact, LimitKind, LocalField, ReadError, ZipArchive, ZipError,
+    Anomaly, AnomalyKind, Component, Impact, LimitKind, LocalField, ReadError, ZipArchive, ZipError,
 };
 use support::{
     EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, signing_block,
@@ -156,7 +156,8 @@ fn data_prepended_without_adjusting_offsets() {
 
     assert!(archive.anomalies().contains(&Anomaly {
         kind: AnomalyKind::OffsetsShifted { delta: 100 },
-        entry: None
+        entry: None,
+        component: None,
     }));
     assert!(has(&archive, "zip.prefix_data", None));
     assert_eq!(archive.layout().offset_shift, 100);
@@ -243,6 +244,10 @@ fn zip64_archive() {
     let data = into_zip64(&sample().build());
     let archive = parse(&data);
     assert_eq!(codes(archive.anomalies()), ["zip.zip64.used"]);
+    assert_eq!(
+        archive.anomalies()[0].component,
+        Some(Component::SigningBlock)
+    );
     assert!(archive.android_accepts());
     assert!(archive.layout().zip64_eocd_offset.is_some());
     assert_eq!(archive.read(2).unwrap().data, b"hello hello hello");
@@ -458,12 +463,59 @@ fn invalid_compression_method_reads_as_stored() {
     let data = ZipBuilder::new().entry(entry).build();
     let archive = parse(&data);
     let found = find(archive.anomalies(), "zip.entry.unsupported_method");
+    let effects: Vec<_> = found.iter().map(|a| (a.component, a.impact())).collect();
+    assert_eq!(
+        effects,
+        [
+            (Some(Component::Resources), Impact::Divergence),
+            (Some(Component::JarSignature), Impact::Divergence),
+        ]
+    );
     assert_eq!(
         found[0].kind,
         AnomalyKind::UnsupportedMethod { method: 0x1337 }
     );
     assert!(archive.android_accepts());
     assert_eq!(archive.read(0).unwrap().data, b"<manifest/>");
+}
+
+#[test]
+fn invalid_compression_method_depends_on_the_reader() {
+    let names = [
+        ("classes2.dex", Component::Dex, Impact::EntryRejected),
+        (
+            "lib/arm64-v8a/libnative.so",
+            Component::NativeLibraries,
+            Impact::EntryRejected,
+        ),
+        (
+            "META-INF/CERT.SF",
+            Component::JarSignature,
+            Impact::Divergence,
+        ),
+    ];
+    let mut builder = ZipBuilder::new();
+    for (name, _, _) in names {
+        let mut entry = EntrySpec::stored(name, b"payload");
+        entry.method = 99;
+        entry.local.method = Some(99);
+        builder = builder.entry(entry);
+    }
+    let data = builder.build();
+    let archive = parse(&data);
+    for (index, (name, component, impact)) in names.into_iter().enumerate() {
+        assert_eq!(archive.entries()[index].component, component, "{name}");
+        let effects: Vec<_> = archive
+            .entry_anomalies(index)
+            .filter(|a| a.code() == "zip.entry.unsupported_method")
+            .map(|a| (a.component, a.impact()))
+            .collect();
+        let mut expected = vec![(Some(component), impact)];
+        if component != Component::JarSignature {
+            expected.push((Some(Component::JarSignature), Impact::Divergence));
+        }
+        assert_eq!(effects, expected, "{name}");
+    }
 }
 
 #[test]
@@ -607,17 +659,26 @@ fn crc_mismatch_is_reported_but_ignored() {
 
 #[test]
 fn data_descriptor_mismatch() {
-    let mut entry = EntrySpec::deflated("a", b"aaaa").with_data_descriptor(true);
-    let last = entry.data_descriptor.len() - 1;
-    entry.data_descriptor[last] = 0x7F;
-    let data = ZipBuilder::new().entry(entry).build();
+    let mut builder = ZipBuilder::new();
+    for name in ["classes.dex", "res/raw/a.bin"] {
+        let mut entry = EntrySpec::deflated(name, b"aaaa").with_data_descriptor(true);
+        let last = entry.data_descriptor.len() - 1;
+        entry.data_descriptor[last] = 0x7F;
+        builder = builder.entry(entry);
+    }
+    let data = builder.build();
     let archive = parse(&data);
-    let read = archive.read(0).unwrap();
+    let dex = archive.read(0).unwrap();
     assert_eq!(
-        codes(&read.anomalies),
+        codes(&dex.anomalies),
         ["zip.entry.data_descriptor_mismatch"]
     );
-    assert_eq!(read.anomalies[0].impact(), Impact::EntryRejected);
+    assert_eq!(dex.anomalies[0].component, Some(Component::Dex));
+    assert_eq!(dex.anomalies[0].impact(), Impact::EntryRejected);
+    // The resource loader does not check data descriptors.
+    let resource = archive.read(1).unwrap();
+    assert_eq!(resource.anomalies[0].component, Some(Component::Resources));
+    assert_eq!(resource.anomalies[0].impact(), Impact::Divergence);
 }
 
 #[test]
@@ -680,7 +741,8 @@ fn hidden_central_directory_records() {
     let archive = parse(&data);
     assert!(archive.anomalies().contains(&Anomaly {
         kind: AnomalyKind::HiddenCentralRecords { count: 1 },
-        entry: None
+        entry: None,
+        component: None,
     }));
     assert_eq!(archive.entries().len(), 4);
 }
@@ -742,7 +804,8 @@ fn overlapping_entries() {
     let archive = parse(&data);
     assert!(archive.anomalies().contains(&Anomaly {
         kind: AnomalyKind::Overlap { other: 0 },
-        entry: Some(1)
+        entry: Some(1),
+        component: Some(Component::Resources),
     }));
     assert_eq!(archive.read(1).unwrap().data, b"shared");
 }
@@ -801,9 +864,19 @@ fn codes_are_stable() {
     ];
     for (kind, code, impact) in kinds {
         assert_eq!(kind.code(), code);
-        assert_eq!(kind.impact(), impact);
+        assert_eq!(kind.impact_in(None), impact);
         assert!(!kind.to_string().is_empty());
     }
     assert_eq!(ReadError::InvalidDeflate.code(), "zip.read.invalid_deflate");
     assert_eq!(Impact::Divergence.code(), "divergence");
+    assert_eq!(Component::NativeLibraries.code(), "native_libraries");
+    let anomaly = AnomalyKind::UnsupportedMethod { method: 99 };
+    assert_eq!(
+        anomaly.impact_in(Some(Component::Dex)),
+        Impact::EntryRejected
+    );
+    assert_eq!(
+        anomaly.impact_in(Some(Component::Resources)),
+        Impact::Divergence
+    );
 }

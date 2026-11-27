@@ -20,6 +20,7 @@
 
 mod anomaly;
 mod bytes;
+mod component;
 mod crc32;
 mod eocd;
 mod error;
@@ -36,6 +37,7 @@ use bytes::{Cursor, count_occurrences, slice, u16_at, u32_at, u64_at};
 use eocd::{EOCD_LEN, Eocd, Zip64Eocd};
 
 pub use anomaly::{Anomaly, AnomalyKind, Impact, LocalField};
+pub use component::Component;
 pub use error::{LimitKind, ReadError, ZipError};
 pub use read::EntryContent;
 
@@ -67,6 +69,8 @@ pub struct Entry {
     pub index: usize,
     /// Raw name bytes.
     pub name: Vec<u8>,
+    /// The Android component that reads this entry, from its name.
+    pub component: Component,
     /// Compression method declared by the central directory.
     pub method: u16,
     /// General purpose flags of the central directory.
@@ -408,6 +412,8 @@ struct Parser<'a> {
     data: &'a [u8],
     limits: Limits,
     anomalies: Vec<Anomaly>,
+    /// Component of each entry read so far, by index.
+    components: Vec<Component>,
 }
 
 impl<'a> Parser<'a> {
@@ -416,6 +422,7 @@ impl<'a> Parser<'a> {
             data,
             limits,
             anomalies: Vec::new(),
+            components: Vec::new(),
         }
     }
 
@@ -424,7 +431,24 @@ impl<'a> Parser<'a> {
     }
 
     fn entry(&mut self, index: usize, kind: AnomalyKind) {
-        self.anomalies.push(Anomaly::entry(index, kind));
+        let component = self
+            .components
+            .get(index)
+            .copied()
+            .unwrap_or(Component::Resources);
+        self.anomalies.push(Anomaly::entry(index, component, kind));
+    }
+
+    /// Reports an anomaly for the component that reads the entry, and again
+    /// for the JAR signature verifier, which digests every entry and reads
+    /// its content differently.
+    fn entry_and_jar_signature(&mut self, index: usize, kind: AnomalyKind) {
+        let component = self.components.get(index).copied();
+        self.entry(index, kind.clone());
+        if component != Some(Component::JarSignature) {
+            self.anomalies
+                .push(Anomaly::entry(index, Component::JarSignature, kind));
+        }
     }
 
     fn input_len(&self) -> u64 {
@@ -463,10 +487,13 @@ impl<'a> Parser<'a> {
         let next_structure = directory.zip64.map_or(eocd.offset, |zip64| zip64.offset);
         let cd_end = cd_offset.saturating_add(directory.size);
         if cd_end < next_structure {
-            self.archive(AnomalyKind::CentralDirectoryGap {
-                offset: cd_end,
-                len: next_structure.saturating_sub(cd_end),
-            });
+            self.anomalies.push(Anomaly::archive_in(
+                Component::SigningBlock,
+                AnomalyKind::CentralDirectoryGap {
+                    offset: cd_end,
+                    len: next_structure.saturating_sub(cd_end),
+                },
+            ));
         }
 
         let mut entries = Vec::with_capacity(records.len());
@@ -540,7 +567,10 @@ impl<'a> Parser<'a> {
 
         let directory = match zip64 {
             Some(zip64) => {
-                self.archive(AnomalyKind::Zip64);
+                self.anomalies.push(Anomaly::archive_in(
+                    Component::SigningBlock,
+                    AnomalyKind::Zip64,
+                ));
                 let mismatch = (eocd.entries_total != u16::MAX
                     && u64::from(eocd.entries_total) != zip64.entries_total)
                     || (eocd.cd_size != u32::MAX && u64::from(eocd.cd_size) != zip64.cd_size)
@@ -685,10 +715,11 @@ impl<'a> Parser<'a> {
             let local_header_offset = local_header_offset.saturating_add(shift);
 
             let index = usize::try_from(entry).unwrap_or(usize::MAX);
+            let name_bytes = cd.get(name.clone()).unwrap_or_default();
+            self.components.push(Component::for_entry(name_bytes));
             if local_header_offset >= cd_offset {
                 self.entry(index, AnomalyKind::LocalHeaderOutOfRange);
             }
-            let name_bytes = cd.get(name.clone()).unwrap_or_default();
             if !names::is_valid_for_android(name_bytes) {
                 self.entry(index, AnomalyKind::InvalidName);
             }
@@ -764,6 +795,7 @@ impl<'a> Parser<'a> {
         let name = cd.get(record.name.clone()).unwrap_or_default().to_vec();
         let mut entry = Entry {
             index,
+            component: Component::for_entry(&name),
             name,
             method: record.method,
             flags: record.flags,
@@ -787,7 +819,7 @@ impl<'a> Parser<'a> {
             );
         }
         if record.method != METHOD_STORED && record.method != METHOD_DEFLATED {
-            self.entry(
+            self.entry_and_jar_signature(
                 index,
                 AnomalyKind::UnsupportedMethod {
                     method: record.method,
