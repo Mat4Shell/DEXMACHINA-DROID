@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Mathias EMON (Mat4Shell)
+
+# Fuzzing harness for droid-archive, run with `cargo +nightly fuzz`. It is a
+# separate workspace: it is never built with the product, nor linked into the
+# droid binary.
+
+[package]
+name = "droid-archive-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+droid-archive = { path = ".." }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "zip_archive"
+path = "fuzz_targets/zip_archive.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
