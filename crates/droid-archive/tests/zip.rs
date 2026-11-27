@@ -1003,7 +1003,10 @@ fn name_length_overflows(archive: &ZipArchive<'_>) -> Vec<(bool, bool)> {
         .map(|anomaly| {
             assert_eq!(anomaly.entry, Some(1));
             assert_eq!(anomaly.component, Some(Component::NativeLibraries));
-            assert_eq!(anomaly.impact(), Impact::Exploit);
+            // A patched Android skips the entry: the vulnerability is a
+            // separate attribute, not an impact.
+            assert_eq!(anomaly.impact(), Impact::Suspicious);
+            assert_eq!(anomaly.known_vulnerabilities(), ["CVE-2026-58995"]);
             let AnomalyKind::NameLengthOverflow {
                 lib_prefix,
                 bc_suffix,
@@ -1142,6 +1145,34 @@ fn name_length_overflow_needs_an_entry_the_zip_library_returns() {
 }
 
 #[test]
+fn known_vulnerabilities_are_independent_of_the_impact() {
+    let overflow = AnomalyKind::NameLengthOverflow {
+        lib_prefix: false,
+        bc_suffix: true,
+    };
+    assert_eq!(overflow.known_vulnerabilities(), ["CVE-2026-58995"]);
+    assert_eq!(
+        overflow.impact_in(Some(Component::NativeLibraries)),
+        Impact::Suspicious
+    );
+    // The generic long name anomaly, reported for the same entry, is not
+    // linked to the vulnerability: its threshold does not single out the
+    // overflowing length.
+    let long_name = AnomalyKind::LongName {
+        len: 65_535,
+        longest_component: 65_535,
+    };
+    for kind in [
+        long_name,
+        AnomalyKind::DuplicateName { first: 0 },
+        AnomalyKind::UnsupportedMethod { method: 99 },
+        AnomalyKind::DexUnreachable { missing: 2 },
+    ] {
+        assert!(kind.known_vulnerabilities().is_empty(), "{kind:?}");
+    }
+}
+
+#[test]
 fn codes_are_stable() {
     let kinds = [
         (
@@ -1175,7 +1206,7 @@ fn codes_are_stable() {
                 bc_suffix: false,
             },
             "zip.entry.name_length_overflow",
-            Impact::Exploit,
+            Impact::Suspicious,
         ),
     ];
     for (kind, code, impact) in kinds {
@@ -1185,7 +1216,6 @@ fn codes_are_stable() {
     }
     assert_eq!(ReadError::InvalidDeflate.code(), "zip.read.invalid_deflate");
     assert_eq!(Impact::Divergence.code(), "divergence");
-    assert_eq!(Impact::Exploit.code(), "exploit");
     assert_eq!(Component::NativeLibraries.code(), "native_libraries");
     let anomaly = AnomalyKind::UnsupportedMethod { method: 99 };
     assert_eq!(

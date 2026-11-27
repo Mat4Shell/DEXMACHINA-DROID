@@ -16,11 +16,6 @@ use super::component::Component;
 /// What an anomaly means for an Android device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Impact {
-    /// The construction triggers a published vulnerability of the component
-    /// that reads it, on devices that do not have the fix: the archive acts
-    /// on the device that opens it instead of being refused. The anomaly
-    /// documents the CVE and the security patch level that fixes it.
-    Exploit,
     /// Android refuses to open the archive.
     ArchiveRejected,
     /// The archive opens, but Android fails when it accesses this entry.
@@ -40,7 +35,6 @@ impl Impact {
     /// Stable identifier of the impact.
     pub const fn code(self) -> &'static str {
         match self {
-            Self::Exploit => "exploit",
             Self::ArchiveRejected => "archive_rejected",
             Self::EntryRejected => "entry_rejected",
             Self::Divergence => "divergence",
@@ -230,6 +224,12 @@ pub enum AnomalyKind {
     /// opens the archive ([`android_accepts`](super::ZipArchive::android_accepts)).
     /// Android 5.x scanned every entry, so that any 65535-byte name crashes
     /// it; that behaviour is not modelled.
+    ///
+    /// The impact is [`Impact::Suspicious`], from the behaviour of a patched
+    /// Android: the installer skips the entry without failing, as it skips
+    /// every name of 4096 bytes or more, and the archive installs. The
+    /// vulnerability is carried by
+    /// [`known_vulnerabilities`](Self::known_vulnerabilities).
     NameLengthOverflow {
         /// The name starts with `lib/`.
         lib_prefix: bool,
@@ -394,6 +394,18 @@ impl AnomalyKind {
         }
     }
 
+    /// Known vulnerabilities of Android that the construction triggers on
+    /// devices without their fix, as CVE identifiers. Empty for most kinds.
+    ///
+    /// This is independent of the [impact](Self::impact_in), which describes
+    /// how an up-to-date Android reads the archive.
+    pub const fn known_vulnerabilities(&self) -> &'static [&'static str] {
+        match self {
+            Self::NameLengthOverflow { .. } => &["CVE-2026-58995"],
+            _ => &[],
+        }
+    }
+
     /// What the anomaly means for an Android device, when the given
     /// component reads the entry. `None` stands for the ZIP library that all
     /// components share, which is the only reader of the archive structure.
@@ -409,7 +421,6 @@ impl AnomalyKind {
             _ => {}
         }
         match self {
-            Self::NameLengthOverflow { .. } => Impact::Exploit,
             Self::EocdLengthMismatch { .. }
             | Self::Zip64LocatorMissing
             | Self::EmptyArchive
@@ -461,6 +472,7 @@ impl AnomalyKind {
             | Self::SigningBlockMalformed
             | Self::EmptyName
             | Self::LongName { .. }
+            | Self::NameLengthOverflow { .. }
             | Self::PathTraversal
             | Self::AbsolutePath
             | Self::Backslash
@@ -676,6 +688,12 @@ impl Anomaly {
     /// Stable identifier of the anomaly kind.
     pub const fn code(&self) -> &'static str {
         self.kind.code()
+    }
+
+    /// Known vulnerabilities that the anomaly's construction triggers, as CVE
+    /// identifiers: see [`AnomalyKind::known_vulnerabilities`].
+    pub const fn known_vulnerabilities(&self) -> &'static [&'static str] {
+        self.kind.known_vulnerabilities()
     }
 
     /// What the anomaly means for an Android device, as seen by

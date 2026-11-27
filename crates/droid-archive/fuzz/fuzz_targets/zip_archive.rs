@@ -52,7 +52,8 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(bc_suffix, name.ends_with(b".bc"));
             assert!(lib_prefix || bc_suffix);
             assert_eq!(anomaly.component, Some(Component::NativeLibraries));
-            assert_eq!(anomaly.impact(), Impact::Exploit);
+            assert_eq!(anomaly.impact(), Impact::Suspicious);
+            assert_eq!(anomaly.known_vulnerabilities(), ["CVE-2026-58995"]);
             assert!(archive.entry_anomalies(index).all(|other| !matches!(
                 other.kind,
                 AnomalyKind::InvalidName
@@ -67,6 +68,9 @@ fuzz_target!(|data: &[u8]| {
                     || component == Component::JarSignature
                     || matches!(anomaly.kind, AnomalyKind::NameLengthOverflow { .. })
             );
+        }
+        for id in anomaly.known_vulnerabilities() {
+            assert!(id.starts_with("CVE-"));
         }
         assert!(!anomaly.code().is_empty());
         let _ = anomaly.to_string();
