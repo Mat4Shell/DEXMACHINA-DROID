@@ -56,7 +56,8 @@ const FLAG_STRONG_ENCRYPTION: u16 = 0x0040;
 /// Names of at least this many bytes are reported as
 /// [`AnomalyKind::LongName`]. It is `PATH_MAX` on Linux: Android's native
 /// library installer copies entry names into a buffer of that size and skips
-/// the entries whose name does not fit.
+/// the entries whose name does not fit, except 65535-byte names on devices
+/// without the fix for CVE-2026-58995 ([`AnomalyKind::NameLengthOverflow`]).
 pub const LONG_NAME_LEN: usize = 4096;
 /// Names with a path component longer than this many bytes are reported as
 /// [`AnomalyKind::LongName`]. It is `NAME_MAX` on Linux: no file system path
@@ -518,6 +519,7 @@ impl<'a> Parser<'a> {
             entries.push(self.entry_from_record(index, record, cd, cd_offset));
         }
         self.check_names(&entries);
+        self.check_name_length_overflow(&entries);
         self.check_dex_sequence(&entries);
         if directory.entries > 0 {
             self.check_prefix(&entries, cd_offset);
@@ -1033,6 +1035,57 @@ impl<'a> Parser<'a> {
                 self.entry(index, AnomalyKind::DexUnreachable { missing });
             }
         }
+    }
+
+    /// CVE-2026-58995. The native library installer iterates over the entries
+    /// whose name starts with `lib/`, then over those whose name ends with
+    /// `.bc`, and copies each name with `ZipFileRO::getEntryFileName`, whose
+    /// size computation wraps to 0 for a 65535-byte name. libziparchive's
+    /// iteration (`Next`) only returns an entry after `FindEntry` has checked
+    /// its local header, and only in an archive that it opened.
+    fn check_name_length_overflow(&mut self, entries: &[Entry]) {
+        for entry in entries {
+            let name = entry.name.as_slice();
+            if name.len() != usize::from(u16::MAX) {
+                continue;
+            }
+            let lib_prefix = name.starts_with(b"lib/");
+            let bc_suffix = name.ends_with(b".bc");
+            if !(lib_prefix || bc_suffix) || self.zip_library_fails(entry.index) {
+                continue;
+            }
+            self.anomalies.push(Anomaly::entry(
+                entry.index,
+                Component::NativeLibraries,
+                AnomalyKind::NameLengthOverflow {
+                    lib_prefix,
+                    bc_suffix,
+                },
+            ));
+        }
+    }
+
+    /// Whether libziparchive refuses the archive because of this entry, or
+    /// fails to look it up (`FindEntry`), from the anomalies found so far.
+    fn zip_library_fails(&self, index: usize) -> bool {
+        self.anomalies.iter().any(|anomaly| {
+            anomaly.entry == Some(index)
+                && matches!(
+                    anomaly.kind,
+                    AnomalyKind::InvalidName
+                        | AnomalyKind::LocalHeaderOutOfRange
+                        | AnomalyKind::LocalHeaderTruncated
+                        | AnomalyKind::LocalHeaderMissing
+                        | AnomalyKind::LocalNameMismatch
+                        | AnomalyKind::LocalZip64Invalid
+                        | AnomalyKind::Zip64ExtraInvalid
+                        | AnomalyKind::DataOutOfRange
+                        | AnomalyKind::LocalValueMismatch {
+                            data_descriptor: false,
+                            ..
+                        }
+                )
+        })
     }
 
     fn check_names(&mut self, entries: &[Entry]) {

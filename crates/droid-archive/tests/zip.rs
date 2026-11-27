@@ -14,8 +14,8 @@ use droid_archive::zip::{
     LocalField, ReadError, ZipArchive, ZipError,
 };
 use support::{
-    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, sample,
-    signing_block,
+    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, padded_name,
+    sample, signing_block,
 };
 
 fn parse(data: &[u8]) -> ZipArchive<'_> {
@@ -984,6 +984,163 @@ fn only_art_names_fill_the_dex_sequence() {
     );
 }
 
+const MAX_NAME_LEN: usize = 65_535;
+const SHORTER_NAME_LEN: usize = 65_534;
+/// A byte of the padding, in names built by [`padded_name`].
+const PADDING_BYTE: usize = 30_000;
+
+fn overflow_archive(entry: EntrySpec) -> Vec<u8> {
+    ZipBuilder::new()
+        .entry(EntrySpec::stored("AndroidManifest.xml", b"<m/>"))
+        .entry(entry)
+        .build()
+}
+
+/// The name length overflows reported on entry 1, as (lib/, .bc) pairs.
+fn name_length_overflows(archive: &ZipArchive<'_>) -> Vec<(bool, bool)> {
+    find(archive.anomalies(), "zip.entry.name_length_overflow")
+        .iter()
+        .map(|anomaly| {
+            assert_eq!(anomaly.entry, Some(1));
+            assert_eq!(anomaly.component, Some(Component::NativeLibraries));
+            assert_eq!(anomaly.impact(), Impact::Exploit);
+            let AnomalyKind::NameLengthOverflow {
+                lib_prefix,
+                bc_suffix,
+            } = anomaly.kind
+            else {
+                panic!("unexpected kind {:?}", anomaly.kind);
+            };
+            (lib_prefix, bc_suffix)
+        })
+        .collect()
+}
+
+#[test]
+fn maximal_name_under_lib_overflows_the_native_library_scan() {
+    let name = padded_name("lib/arm64-v8a/lib", ".so", MAX_NAME_LEN);
+    let data = overflow_archive(EntrySpec::stored(&name, b"\x7fELF"));
+    let archive = parse(&data);
+    assert_eq!(name_length_overflows(&archive), [(true, false)]);
+    let anomaly = find(archive.anomalies(), "zip.entry.name_length_overflow")[0];
+    assert_eq!(
+        anomaly.to_string(),
+        "[zip.entry.name_length_overflow] entry 1: (native_libraries) 65535-byte name \
+         overflows the name copy of the native library installer (lib/ scan) on Android \
+         before the 2026-11-01 security patch level (CVE-2026-58995)"
+    );
+    // Android opens the archive, and the generic long name anomaly is still
+    // reported.
+    assert!(archive.android_accepts());
+    assert!(has(&archive, "zip.entry.long_name", Some(1)));
+    assert_eq!(archive.entries()[1].component, Component::NativeLibraries);
+    assert_eq!(archive.read(1).unwrap().data, b"\x7fELF");
+}
+
+#[test]
+fn only_the_prefix_matters_in_the_native_library_scan() {
+    // The installer copies the name before checking that it is
+    // `lib/<abi>/<file>`: neither the ABI nor the file name is required.
+    for name in [
+        padded_name("lib/", "", MAX_NAME_LEN),
+        padded_name("lib/x86/sub/", ".txt", MAX_NAME_LEN),
+        padded_name("lib/", "/", MAX_NAME_LEN),
+    ] {
+        let data = overflow_archive(EntrySpec::stored(&name, b""));
+        let archive = parse(&data);
+        assert_eq!(
+            name_length_overflows(&archive),
+            [(true, false)],
+            "{name:.20}"
+        );
+    }
+}
+
+#[test]
+fn maximal_bitcode_name_overflows_the_renderscript_scan() {
+    let name = padded_name("assets/", ".bc", MAX_NAME_LEN);
+    let data = overflow_archive(EntrySpec::deflated(&name, b"BC\xc0\xde"));
+    let archive = parse(&data);
+    assert_eq!(name_length_overflows(&archive), [(false, true)]);
+    // The entry is read by the resource loader; the anomaly names the
+    // installer, which scans every name.
+    assert_eq!(archive.entries()[1].component, Component::Resources);
+    let anomaly = find(archive.anomalies(), "zip.entry.name_length_overflow")[0];
+    assert!(anomaly.to_string().contains("(.bc scan)"));
+
+    let name = padded_name("lib/", ".bc", MAX_NAME_LEN);
+    let data = overflow_archive(EntrySpec::stored(&name, b""));
+    let archive = parse(&data);
+    assert_eq!(name_length_overflows(&archive), [(true, true)]);
+    let anomaly = find(archive.anomalies(), "zip.entry.name_length_overflow")[0];
+    assert!(anomaly.to_string().contains("(lib/ and .bc scans)"));
+}
+
+#[test]
+fn names_that_do_not_overflow() {
+    for name in [
+        // One byte shorter: the size is computed without wrapping, and the
+        // installer skips the entry on every device.
+        padded_name("lib/arm64-v8a/lib", ".so", SHORTER_NAME_LEN),
+        padded_name("assets/", ".bc", SHORTER_NAME_LEN),
+        // Neither scan returns these entries: the prefix and the suffix are
+        // compared byte for byte.
+        padded_name("assets/", ".bin", MAX_NAME_LEN),
+        padded_name("Lib/", ".so", MAX_NAME_LEN),
+        padded_name("assets/lib/", ".so", MAX_NAME_LEN),
+        padded_name("assets/", ".BC", MAX_NAME_LEN),
+        padded_name("assets/", ".bc/", MAX_NAME_LEN),
+    ] {
+        let data = overflow_archive(EntrySpec::stored(&name, b""));
+        let archive = parse(&data);
+        assert!(name_length_overflows(&archive).is_empty(), "{name:.20}");
+        assert!(has(&archive, "zip.entry.long_name", Some(1)));
+    }
+}
+
+#[test]
+fn name_length_overflow_needs_an_entry_the_zip_library_returns() {
+    let name = padded_name("lib/arm64-v8a/lib", ".so", MAX_NAME_LEN);
+
+    // libziparchive's iteration checks the local header with `FindEntry`
+    // and stops on an error before the installer sees the name.
+    let mut other_name = name.clone().into_bytes();
+    other_name[PADDING_BYTE] = b'_';
+    let mut renamed = EntrySpec::stored(&name, b"x");
+    renamed.local.name = Some(other_name);
+    let mut wrong_crc = EntrySpec::stored(&name, b"x");
+    wrong_crc.local.crc32 = Some(0);
+    let mut missing_header = EntrySpec::stored(&name, b"x");
+    missing_header.local_header_offset = Some(4);
+    let mut past_the_directory = EntrySpec::stored(&name, b"x");
+    past_the_directory.central_only = true;
+    for (entry, code) in [
+        (renamed, "zip.entry.lfh_name_mismatch"),
+        (wrong_crc, "zip.entry.lfh_value_mismatch"),
+        (missing_header, "zip.entry.lfh_missing"),
+        (past_the_directory, "zip.entry.lfh_out_of_range"),
+    ] {
+        let data = overflow_archive(entry);
+        let archive = parse(&data);
+        assert!(has(&archive, code, Some(1)), "{code}");
+        assert!(name_length_overflows(&archive).is_empty(), "{code}");
+    }
+
+    // With a data descriptor, `FindEntry` ignores the local CRC and sizes.
+    let data = overflow_archive(EntrySpec::stored(&name, b"x").with_data_descriptor(true));
+    let archive = parse(&data);
+    assert_eq!(name_length_overflows(&archive), [(true, false)]);
+
+    // A name that Android refuses makes it refuse the whole archive.
+    let mut invalid = name.into_bytes();
+    invalid[PADDING_BYTE] = 0;
+    let data = overflow_archive(EntrySpec::stored("lib/x", b"").with_name_bytes(&invalid));
+    let archive = parse(&data);
+    assert!(has(&archive, "zip.entry.invalid_name", Some(1)));
+    assert!(!archive.android_accepts());
+    assert!(name_length_overflows(&archive).is_empty());
+}
+
 #[test]
 fn codes_are_stable() {
     let kinds = [
@@ -1012,6 +1169,14 @@ fn codes_are_stable() {
             "zip.entry.dex_unreachable",
             Impact::Suspicious,
         ),
+        (
+            AnomalyKind::NameLengthOverflow {
+                lib_prefix: true,
+                bc_suffix: false,
+            },
+            "zip.entry.name_length_overflow",
+            Impact::Exploit,
+        ),
     ];
     for (kind, code, impact) in kinds {
         assert_eq!(kind.code(), code);
@@ -1020,6 +1185,7 @@ fn codes_are_stable() {
     }
     assert_eq!(ReadError::InvalidDeflate.code(), "zip.read.invalid_deflate");
     assert_eq!(Impact::Divergence.code(), "divergence");
+    assert_eq!(Impact::Exploit.code(), "exploit");
     assert_eq!(Component::NativeLibraries.code(), "native_libraries");
     let anomaly = AnomalyKind::UnsupportedMethod { method: 99 };
     assert_eq!(
