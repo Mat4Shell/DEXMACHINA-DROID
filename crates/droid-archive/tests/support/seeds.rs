@@ -7,12 +7,15 @@
 //! fuzzing workflow writes these archives to disk before each run.
 
 use super::{
-    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, into_zip64, sample, signing_block,
+    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, into_zip64, padded_name, sample,
+    signing_block,
 };
 
 /// Every seed is at most this long, so that libFuzzer never truncates one
-/// (the workflow runs with `-max_len=70000`).
-pub const MAX_SEED_LEN: usize = 70_000;
+/// (the workflow runs with `-max_len=140000`). An archive with a 65535-byte
+/// name that Android can look up holds it twice, in the local header and in
+/// the central directory, and is at least 131168 bytes long.
+pub const MAX_SEED_LEN: usize = 140_000;
 
 /// Returns the seeds as (file name, content) pairs. File names are unique.
 pub fn all() -> Vec<(&'static str, Vec<u8>)> {
@@ -203,6 +206,21 @@ pub fn all() -> Vec<(&'static str, Vec<u8>)> {
         .entry(EntrySpec::deflated("META-INF/CERT.RSA", b"0\x82"));
     components.before_central_directory = signing_block();
     seeds.push(("components.zip", components.build()));
+
+    // CVE-2026-58995: 65535-byte names under `lib/` and ending in `.bc`.
+    for (seed, prefix, suffix) in [
+        ("name-length-overflow-lib.zip", "lib/arm64-v8a/lib", ".so"),
+        ("name-length-overflow-bc.zip", "assets/", ".bc"),
+    ] {
+        let name = padded_name(prefix, suffix, usize::from(u16::MAX));
+        seeds.push((
+            seed,
+            ZipBuilder::new()
+                .entry(EntrySpec::stored("AndroidManifest.xml", b"<manifest/>"))
+                .entry(EntrySpec::stored(&name, b"\x7fELF"))
+                .build(),
+        ));
+    }
 
     seeds.push(("empty.zip", ZipBuilder::new().build()));
 
