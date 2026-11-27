@@ -885,6 +885,105 @@ fn long_names_are_reported_not_refused() {
     assert_eq!(LONG_NAME_COMPONENT_LEN, 255);
 }
 
+fn dex_archive(names: &[&str]) -> Vec<u8> {
+    let mut builder = ZipBuilder::new().entry(EntrySpec::stored("AndroidManifest.xml", b"<m/>"));
+    for name in names {
+        builder = builder.entry(EntrySpec::deflated(name, b"dex\n035\0"));
+    }
+    builder.build()
+}
+
+fn unreachable_dex(archive: &ZipArchive<'_>) -> Vec<(String, u64)> {
+    find(archive.anomalies(), "zip.entry.dex_unreachable")
+        .iter()
+        .map(|anomaly| {
+            let index = anomaly.entry.unwrap();
+            assert_eq!(anomaly.component, Some(Component::Dex));
+            assert_eq!(anomaly.impact(), Impact::Suspicious);
+            let AnomalyKind::DexUnreachable { missing } = anomaly.kind else {
+                panic!("unexpected kind {:?}", anomaly.kind);
+            };
+            (archive.entries()[index].name_lossy().into_owned(), missing)
+        })
+        .collect()
+}
+
+#[test]
+fn contiguous_dex_entries_are_all_loaded() {
+    let data = dex_archive(&["classes3.dex", "classes.dex", "classes2.dex"]);
+    let archive = parse(&data);
+    assert!(unreachable_dex(&archive).is_empty());
+    assert!(archive.anomalies().is_empty(), "{:?}", archive.anomalies());
+}
+
+#[test]
+fn dex_entries_after_a_gap_are_never_loaded() {
+    let data = dex_archive(&["classes.dex", "classes3.dex"]);
+    let archive = parse(&data);
+    assert_eq!(unreachable_dex(&archive), [("classes3.dex".to_string(), 2)]);
+    // ART skips the entry silently: the archive installs and runs.
+    assert!(archive.android_accepts());
+    let anomaly = find(archive.anomalies(), "zip.entry.dex_unreachable")[0];
+    assert_eq!(
+        anomaly.to_string(),
+        "[zip.entry.dex_unreachable] entry 2: (dex) never loaded by ART, \
+         which stops at the missing classes2.dex"
+    );
+
+    let data = dex_archive(&[
+        "classes.dex",
+        "classes2.dex",
+        "classes4.dex",
+        "classes5.dex",
+        "classes10.dex",
+    ]);
+    let archive = parse(&data);
+    assert_eq!(
+        unreachable_dex(&archive),
+        [
+            ("classes4.dex".to_string(), 3),
+            ("classes5.dex".to_string(), 3),
+            ("classes10.dex".to_string(), 3),
+        ]
+    );
+}
+
+#[test]
+fn no_dex_is_loaded_without_classes_dex() {
+    let data = dex_archive(&["classes2.dex", "classes3.dex"]);
+    let archive = parse(&data);
+    assert_eq!(
+        unreachable_dex(&archive),
+        [
+            ("classes2.dex".to_string(), 1),
+            ("classes3.dex".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn only_art_names_fill_the_dex_sequence() {
+    // `classes1.dex`, `classes02.dex` and DEX files outside the root are not
+    // ART names: they do not fill the gap before `classes3.dex`.
+    let data = dex_archive(&[
+        "classes.dex",
+        "classes1.dex",
+        "classes02.dex",
+        "assets/classes2.dex",
+        "Classes2.dex",
+        "classes3.dex",
+        "classes99999999999999999999999.dex",
+    ]);
+    let archive = parse(&data);
+    assert_eq!(
+        unreachable_dex(&archive),
+        [
+            ("classes3.dex".to_string(), 2),
+            ("classes99999999999999999999999.dex".to_string(), 2),
+        ]
+    );
+}
+
 #[test]
 fn codes_are_stable() {
     let kinds = [
@@ -907,6 +1006,11 @@ fn codes_are_stable() {
             AnomalyKind::EocdComment { len: 1 },
             "zip.eocd.comment",
             Impact::Informational,
+        ),
+        (
+            AnomalyKind::DexUnreachable { missing: 2 },
+            "zip.entry.dex_unreachable",
+            Impact::Suspicious,
         ),
     ];
     for (kind, code, impact) in kinds {
