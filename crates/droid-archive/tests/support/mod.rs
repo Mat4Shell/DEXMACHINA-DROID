@@ -7,6 +7,8 @@
 #![cfg(test)]
 #![allow(dead_code)]
 
+pub mod seeds;
+
 pub const METHOD_STORED: u16 = 0;
 pub const METHOD_DEFLATED: u16 = 8;
 pub const FLAG_ENCRYPTED: u16 = 0x0001;
@@ -262,6 +264,22 @@ impl ZipBuilder {
         out.extend_from_slice(&self.trailer);
         out
     }
+}
+
+/// A small valid archive: a stored manifest, a deflated DEX, and two entries
+/// with data descriptors, one of them empty.
+pub fn sample() -> ZipBuilder {
+    ZipBuilder::new()
+        .entry(EntrySpec::stored("AndroidManifest.xml", b"<manifest/>"))
+        .entry(EntrySpec::deflated(
+            "classes.dex",
+            &b"dex\n035\0".repeat(200),
+        ))
+        .entry(
+            EntrySpec::deflated("res/raw/data.txt", b"hello hello hello")
+                .with_data_descriptor(true),
+        )
+        .entry(EntrySpec::stored("assets/empty", b"").with_data_descriptor(false))
 }
 
 /// A central directory record for an entry that has no local header, to be
