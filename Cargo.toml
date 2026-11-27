@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Mathias EMON (Mat4Shell)
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Mat4Shell/dexmachina-droid"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Anti-panic lints required for code that reads untrusted input. They apply to
+# every crate by default; a crate that does not parse analyzed files may relax
+# them locally, with a justification.
+[workspace.lints.clippy]
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+
+[profile.release]
+overflow-checks = true
