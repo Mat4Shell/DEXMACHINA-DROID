@@ -14,7 +14,8 @@ use droid_archive::zip::{
     LocalField, ReadError, ZipArchive, ZipError,
 };
 use support::{
-    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, signing_block,
+    EntrySpec, FLAG_ENCRYPTED, ZipBuilder, bare_central_record, crc32, into_zip64, sample,
+    signing_block,
 };
 
 fn parse(data: &[u8]) -> ZipArchive<'_> {
@@ -33,20 +34,6 @@ fn has(archive: &ZipArchive<'_>, code: &str, entry: Option<usize>) -> bool {
 
 fn codes(anomalies: &[Anomaly]) -> Vec<&'static str> {
     anomalies.iter().map(Anomaly::code).collect()
-}
-
-fn sample() -> ZipBuilder {
-    ZipBuilder::new()
-        .entry(EntrySpec::stored("AndroidManifest.xml", b"<manifest/>"))
-        .entry(EntrySpec::deflated(
-            "classes.dex",
-            &b"dex\n035\0".repeat(200),
-        ))
-        .entry(
-            EntrySpec::deflated("res/raw/data.txt", b"hello hello hello")
-                .with_data_descriptor(true),
-        )
-        .entry(EntrySpec::stored("assets/empty", b"").with_data_descriptor(false))
 }
 
 #[test]
