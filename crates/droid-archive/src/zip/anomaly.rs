@@ -114,6 +114,54 @@ pub enum AnomalyKind {
         /// Length of the data before the first local header.
         len: u64,
     },
+    /// The input starts with the DEX magic (`dex\n`) and the archive behind
+    /// it keeps the layout that a reader trusting the declared offsets
+    /// opens: the central directory is at its declared offset, under a
+    /// classic end of central directory record. Reported with
+    /// [`PrefixData`](Self::PrefixData).
+    ///
+    /// ART decides how to open a file from its first four bytes
+    /// (`DexFile::Open`): a file that starts with `PK` is read as a ZIP
+    /// archive, one that starts with the DEX magic is loaded as a DEX file,
+    /// so ART runs the prefix instead of the archive's `classes.dex`, while
+    /// the readers that verify the archive see the ZIP entries. This is the
+    /// construction of two vulnerabilities:
+    ///
+    /// - CVE-2017-13156 ("Janus"), on Android 5.0 to 8.0 (5.1.1 to 8.0 in
+    ///   the bulletin), fixed by the Android 2017-12-01 security patch level
+    ///   and in Android 8.1: the package installer opened the archive with a
+    ///   ZIP library that accepted data before the first local header, and the
+    ///   JAR signature (v1) does not cover that data, so a DEX file prepended
+    ///   to a signed APK kept its signature. APK Signature Scheme v2, checked
+    ///   from Android 7.0, covers every byte of the file. The fix makes the ZIP
+    ///   library reject any archive that does not start with a local header.
+    ///   The ZIP library of these versions did not read ZIP64 and did not
+    ///   compensate for shifted offsets, which is why both are excluded here.
+    /// - CVE-2024-40673, on Android 12 to 14, fixed by the Android 2024-10-01
+    ///   security patch level and by the ART module update of the same month:
+    ///   `java.util.zip.ZipFile`, used when an application verifies and loads
+    ///   code dynamically, accepted archives that start with neither a local
+    ///   header nor an end of central directory record.
+    ///
+    /// The impact is [`Impact::ArchiveRejected`]: an up-to-date ZIP library
+    /// refuses the archive, like any [`PrefixData`](Self::PrefixData). Whether
+    /// the prefix is a DEX file that ART accepts (version, size, checksum) is
+    /// not checked.
+    DexPrefix,
+    /// The input starts with the DEX magic (`dex\n`), but the archive behind
+    /// it is located only by a reader that compensates for prepended data
+    /// ([`OffsetsShifted`](Self::OffsetsShifted)) or that reads ZIP64.
+    /// Reported with [`PrefixData`](Self::PrefixData).
+    ///
+    /// `java.util.zip.ZipFile` computes where the archive starts from the end
+    /// of central directory record and reads ZIP64, so on Android 12 to 14
+    /// before the 2024-10-01 security patch level, or the ART module update
+    /// of the same month, it opens such a file while ART loads the prefix as
+    /// a DEX file: CVE-2024-40673 (see [`DexPrefix`](Self::DexPrefix)). The
+    /// package installer of Android 5.0 to 8.0 did not open it, so it is not
+    /// a construction of CVE-2017-13156. The impact is
+    /// [`Impact::ArchiveRejected`].
+    DexPrefixRelocated,
     /// The central directory is not where the end of central directory says,
     /// but is found further, as if the archive had been prepended with
     /// `delta` bytes without adjusting its offsets. Android rejects it; some
@@ -170,6 +218,17 @@ pub enum AnomalyKind {
     SigningBlockMalformed,
     /// Two entries have the same name. Android refuses the archive; other
     /// readers keep one or the other.
+    ///
+    /// This is the construction of CVE-2013-4787 ("Master Key", Android bug
+    /// 8219321), on Android 1.6 to 4.2, fixed in Android 4.3: the JAR
+    /// signature verifier read the archive with `java.util.zip.ZipFile`,
+    /// which kept the last entry of each name, while the code that installs
+    /// and loads the application (the ZIP readers of Dalvik and of the
+    /// framework) found the first one. An entry placed before a signed entry
+    /// of the same name was installed without being verified. Every name was
+    /// affected, and the fix rejects any duplicate. Names are compared byte
+    /// by byte, like the native readers; names whose bytes differ but that
+    /// decode to the same Java string are not reported.
     DuplicateName {
         /// Index of the first entry with this name.
         first: usize,
@@ -354,6 +413,8 @@ impl AnomalyKind {
             Self::Zip64EocdMismatch => "zip.zip64.eocd_mismatch",
             Self::EmptyArchive => "zip.empty",
             Self::PrefixData { .. } => "zip.prefix_data",
+            Self::DexPrefix => "zip.prefix_dex",
+            Self::DexPrefixRelocated => "zip.prefix_dex_relocated",
             Self::OffsetsShifted { .. } => "zip.offsets_shifted",
             Self::HiddenCentralRecords { .. } => "zip.cd.hidden_records",
             Self::CentralDirectoryTrailingBytes { .. } => "zip.cd.trailing_bytes",
@@ -401,6 +462,9 @@ impl AnomalyKind {
     /// how an up-to-date Android reads the archive.
     pub const fn known_vulnerabilities(&self) -> &'static [&'static str] {
         match self {
+            Self::DuplicateName { .. } => &["CVE-2013-4787"],
+            Self::DexPrefix => &["CVE-2017-13156", "CVE-2024-40673"],
+            Self::DexPrefixRelocated => &["CVE-2024-40673"],
             Self::NameLengthOverflow { .. } => &["CVE-2026-58995"],
             _ => &[],
         }
@@ -425,6 +489,8 @@ impl AnomalyKind {
             | Self::Zip64LocatorMissing
             | Self::EmptyArchive
             | Self::PrefixData { .. }
+            | Self::DexPrefix
+            | Self::DexPrefixRelocated
             | Self::OffsetsShifted { .. }
             | Self::DuplicateName { .. }
             | Self::InvalidName
@@ -519,6 +585,18 @@ impl fmt::Display for AnomalyKind {
             }
             Self::EmptyArchive => f.write_str("central directory declares no entry"),
             Self::PrefixData { len } => write!(f, "{len} bytes before the first local header"),
+            Self::DexPrefix => f.write_str(
+                "input starts with a DEX header, which ART loads instead of the archive \
+                 on Android 5.0 to 8.0 before the 2017-12-01 security patch level \
+                 (CVE-2017-13156, Janus) and which java.util.zip.ZipFile opens as an \
+                 archive on Android 12 to 14 before the 2024-10-01 security patch level \
+                 (CVE-2024-40673)",
+            ),
+            Self::DexPrefixRelocated => f.write_str(
+                "input starts with a DEX header, which ART loads instead of an archive \
+                 that java.util.zip.ZipFile opens on Android 12 to 14 before the \
+                 2024-10-01 security patch level (CVE-2024-40673)",
+            ),
             Self::OffsetsShifted { delta } => {
                 write!(f, "archive offsets are shifted by {delta} prepended bytes")
             }
@@ -546,7 +624,12 @@ impl fmt::Display for AnomalyKind {
                 "{count} local header signature(s) in unreferenced bytes at {offset}"
             ),
             Self::SigningBlockMalformed => f.write_str("malformed APK Signing Block"),
-            Self::DuplicateName { first } => write!(f, "same name as entry {first}"),
+            Self::DuplicateName { first } => write!(
+                f,
+                "same name as entry {first}; before Android 4.3, the signature verifier \
+                 checked the last entry of a name and the installer used the first \
+                 (CVE-2013-4787, Master Key)"
+            ),
             Self::CaseCollision { first } => {
                 write!(f, "name differs from entry {first} only by case")
             }

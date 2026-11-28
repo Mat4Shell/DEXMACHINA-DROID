@@ -281,6 +281,8 @@ fn duplicate_names() {
     assert_eq!(duplicates.len(), 1);
     assert_eq!(duplicates[0].entry, Some(4));
     assert_eq!(duplicates[0].kind, AnomalyKind::DuplicateName { first: 0 });
+    assert_eq!(duplicates[0].known_vulnerabilities(), ["CVE-2013-4787"]);
+    assert!(duplicates[0].to_string().contains("CVE-2013-4787"));
     assert!(!archive.android_accepts());
     assert_eq!(archive.find(b"AndroidManifest.xml").unwrap().index, 0);
     assert_eq!(archive.read(4).unwrap().data, b"<evil/>");
@@ -295,7 +297,191 @@ fn names_differing_by_case() {
     let found = find(archive.anomalies(), "zip.entry.case_collision");
     assert_eq!(found[0].entry, Some(4));
     assert_eq!(found[0].impact(), Impact::Informational);
+    assert!(found[0].known_vulnerabilities().is_empty());
+    assert!(find(archive.anomalies(), "zip.entry.duplicate_name").is_empty());
     assert!(archive.android_accepts());
+}
+
+#[test]
+fn master_key_duplicates_are_linked_whatever_the_entry() {
+    // The native readers keep the first entry of a name, the JAR signature
+    // verifier of Android 4.2 and earlier kept the last one: every duplicate
+    // name, whatever the component that reads it, is the construction.
+    for name in [
+        "classes.dex",
+        "lib/arm64-v8a/libx.so",
+        "META-INF/MANIFEST.MF",
+        "res/",
+    ] {
+        let data = ZipBuilder::new()
+            .entry(EntrySpec::stored(name, b"installed"))
+            .entry(EntrySpec::stored("AndroidManifest.xml", b"<manifest/>"))
+            .entry(EntrySpec::stored(name, b"verified"))
+            .build();
+        let archive = parse(&data);
+        let linked: Vec<_> = archive
+            .anomalies()
+            .iter()
+            .filter(|a| !a.known_vulnerabilities().is_empty())
+            .collect();
+        assert_eq!(linked.len(), 1, "{name}");
+        assert_eq!(linked[0].kind, AnomalyKind::DuplicateName { first: 0 });
+        assert_eq!(linked[0].entry, Some(2));
+        assert_eq!(linked[0].known_vulnerabilities(), ["CVE-2013-4787"]);
+        assert_eq!(archive.find(name.as_bytes()).unwrap().index, 0);
+    }
+}
+
+#[test]
+fn names_that_are_not_master_key_duplicates() {
+    // Same length and a single differing byte, a trailing slash, or the same
+    // name in a local header only: the central directory holds distinct
+    // names, so both readers resolve each name to the same entry.
+    let mut local_copy = EntrySpec::stored("assets/b", b"b");
+    local_copy.local.name = Some(b"assets/a".to_vec());
+    let data = ZipBuilder::new()
+        .entry(EntrySpec::stored("classes.dex", b"a"))
+        .entry(EntrySpec::stored("classes.dey", b"b"))
+        .entry(EntrySpec::stored("assets/x", b"c"))
+        .entry(EntrySpec::stored("assets/x/", b""))
+        .entry(EntrySpec::stored("assets/a", b"a"))
+        .entry(local_copy)
+        .build();
+    let archive = parse(&data);
+    assert!(find(archive.anomalies(), "zip.entry.duplicate_name").is_empty());
+    assert!(has(&archive, "zip.entry.lfh_name_mismatch", Some(5)));
+    assert!(
+        archive
+            .anomalies()
+            .iter()
+            .all(|a| a.known_vulnerabilities().is_empty())
+    );
+}
+
+/// The first bytes of a DEX file header: magic, version and padding.
+fn dex_header() -> Vec<u8> {
+    let mut header = b"dex\n035\0".to_vec();
+    header.resize(0x70, 0);
+    header
+}
+
+fn dex_prefixes(archive: &ZipArchive<'_>) -> Vec<&'static str> {
+    archive
+        .anomalies()
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.kind,
+                AnomalyKind::DexPrefix | AnomalyKind::DexPrefixRelocated
+            )
+        })
+        .map(|a| {
+            assert_eq!(a.entry, None);
+            assert_eq!(a.component, None);
+            assert_eq!(a.impact(), Impact::ArchiveRejected);
+            a.code()
+        })
+        .collect()
+}
+
+#[test]
+fn dex_prepended_with_adjusted_offsets_is_janus() {
+    let mut builder = sample();
+    builder.prefix = dex_header();
+    let data = builder.build();
+    let archive = parse(&data);
+
+    assert_eq!(dex_prefixes(&archive), ["zip.prefix_dex"]);
+    let janus = find(archive.anomalies(), "zip.prefix_dex")[0];
+    assert_eq!(janus.kind, AnomalyKind::DexPrefix);
+    assert_eq!(
+        janus.known_vulnerabilities(),
+        ["CVE-2017-13156", "CVE-2024-40673"]
+    );
+    let text = janus.to_string();
+    assert!(text.contains("CVE-2017-13156") && text.contains("CVE-2024-40673"));
+    // The generic prefix anomaly is still reported, and is not linked.
+    let prefix = find(archive.anomalies(), "zip.prefix_data");
+    assert_eq!(prefix[0].kind, AnomalyKind::PrefixData { len: 0x70 });
+    assert!(prefix[0].known_vulnerabilities().is_empty());
+    assert!(!has(&archive, "zip.offsets_shifted", None));
+    assert!(!archive.android_accepts());
+    assert_eq!(archive.read(0).unwrap().data, b"<manifest/>");
+}
+
+#[test]
+fn dex_prepended_without_adjusting_offsets_is_not_janus() {
+    let mut builder = sample();
+    builder.prefix = dex_header();
+    builder.offsets_include_prefix = false;
+    let data = builder.build();
+    let archive = parse(&data);
+
+    assert_eq!(dex_prefixes(&archive), ["zip.prefix_dex_relocated"]);
+    let found = find(archive.anomalies(), "zip.prefix_dex_relocated")[0];
+    assert_eq!(found.known_vulnerabilities(), ["CVE-2024-40673"]);
+    assert!(found.to_string().contains("CVE-2024-40673"));
+    assert!(!found.to_string().contains("CVE-2017-13156"));
+    assert!(has(&archive, "zip.offsets_shifted", None));
+    assert!(has(&archive, "zip.prefix_data", None));
+    assert_eq!(archive.read(1).unwrap().data, b"dex\n035\0".repeat(200));
+}
+
+#[test]
+fn dex_prepended_to_a_zip64_archive_is_not_janus() {
+    let mut builder = sample();
+    builder.prefix = dex_header();
+    let data = into_zip64(&builder.build());
+    let archive = parse(&data);
+
+    assert!(has(&archive, "zip.zip64.used", None));
+    assert_eq!(dex_prefixes(&archive), ["zip.prefix_dex_relocated"]);
+    assert!(has(&archive, "zip.prefix_data", None));
+}
+
+#[test]
+fn prefixes_that_art_does_not_load_as_dex() {
+    let mut not_magic = vec![
+        b"#!/bin/sh\nexit 0\n".to_vec(),
+        b"dey\n035\0".to_vec(),
+        b"DEX\n035\0".to_vec(),
+        b"dex\r035\0".to_vec(),
+        b"dex".to_vec(),
+        b" dex\n035\0".to_vec(),
+        b"PKdex\n035\0".to_vec(),
+    ];
+    not_magic.push(b"cdex001\0".to_vec());
+    for prefix in not_magic {
+        for offsets_include_prefix in [true, false] {
+            let mut builder = sample();
+            builder.prefix.clone_from(&prefix);
+            builder.offsets_include_prefix = offsets_include_prefix;
+            let data = builder.build();
+            let archive = parse(&data);
+            assert!(has(&archive, "zip.prefix_data", None), "{prefix:?}");
+            assert!(dex_prefixes(&archive).is_empty(), "{prefix:?}");
+            assert!(
+                archive
+                    .anomalies()
+                    .iter()
+                    .all(|a| a.known_vulnerabilities().is_empty()),
+                "{prefix:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dex_bytes_inside_the_archive_are_not_a_prefix() {
+    // A DEX header between the entries and the central directory, or a DEX
+    // entry, is read by no one as the whole file.
+    let mut builder = sample();
+    builder.before_central_directory = dex_header();
+    let data = builder.build();
+    let archive = parse(&data);
+    assert!(has(&archive, "zip.gap.unaccounted", None));
+    assert!(dex_prefixes(&archive).is_empty());
+    assert!(!has(&archive, "zip.prefix_data", None));
 }
 
 #[test]
@@ -1162,9 +1348,26 @@ fn known_vulnerabilities_are_independent_of_the_impact() {
         len: 65_535,
         longest_component: 65_535,
     };
+    // Master Key and the ZIP library's refusal of duplicates.
+    let duplicate = AnomalyKind::DuplicateName { first: 0 };
+    assert_eq!(duplicate.known_vulnerabilities(), ["CVE-2013-4787"]);
+    assert_eq!(duplicate.impact_in(None), Impact::ArchiveRejected);
+    assert_eq!(
+        AnomalyKind::DexPrefix.known_vulnerabilities(),
+        ["CVE-2017-13156", "CVE-2024-40673"]
+    );
+    assert_eq!(
+        AnomalyKind::DexPrefixRelocated.known_vulnerabilities(),
+        ["CVE-2024-40673"]
+    );
+    // Wider kinds that also cover constructions which trigger nothing: any
+    // prepended data, any local name that differs, any case collision.
     for kind in [
         long_name,
-        AnomalyKind::DuplicateName { first: 0 },
+        AnomalyKind::PrefixData { len: 4 },
+        AnomalyKind::OffsetsShifted { delta: 4 },
+        AnomalyKind::CaseCollision { first: 0 },
+        AnomalyKind::LocalNameMismatch,
         AnomalyKind::UnsupportedMethod { method: 99 },
         AnomalyKind::DexUnreachable { missing: 2 },
     ] {
@@ -1207,6 +1410,21 @@ fn codes_are_stable() {
             },
             "zip.entry.name_length_overflow",
             Impact::Suspicious,
+        ),
+        (
+            AnomalyKind::DuplicateName { first: 0 },
+            "zip.entry.duplicate_name",
+            Impact::ArchiveRejected,
+        ),
+        (
+            AnomalyKind::DexPrefix,
+            "zip.prefix_dex",
+            Impact::ArchiveRejected,
+        ),
+        (
+            AnomalyKind::DexPrefixRelocated,
+            "zip.prefix_dex_relocated",
+            Impact::ArchiveRejected,
         ),
     ];
     for (kind, code, impact) in kinds {

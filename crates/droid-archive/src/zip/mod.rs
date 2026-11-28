@@ -42,6 +42,9 @@ pub use error::{LimitKind, ReadError, ZipError};
 pub use read::EntryContent;
 
 const LOCAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x03\x04";
+/// First four bytes of a DEX file. ART loads any file that starts with them
+/// as a DEX file, and any file that starts with `PK` as a ZIP archive.
+const DEX_MAGIC: [u8; 4] = *b"dex\n";
 const LOCAL_HEADER_LEN: u64 = 30;
 const CENTRAL_HEADER_SIGNATURE: u32 = 0x0201_4b50;
 const CENTRAL_HEADER_LEN: u64 = 46;
@@ -523,6 +526,7 @@ impl<'a> Parser<'a> {
         self.check_dex_sequence(&entries);
         if directory.entries > 0 {
             self.check_prefix(&entries, cd_offset);
+            self.check_dex_prefix(shift, directory.zip64.is_some());
         }
         let signing_block = self.signing_block(cd_offset);
         self.check_coverage(&entries, signing_block.as_ref(), cd_offset);
@@ -1145,6 +1149,22 @@ impl<'a> Parser<'a> {
             .unwrap_or(cd_offset)
             .min(cd_offset);
         self.archive(AnomalyKind::PrefixData { len: first });
+    }
+
+    /// CVE-2017-13156 and CVE-2024-40673: ART loads a file that starts with
+    /// the DEX magic as a DEX file, while ZIP readers that accept data before
+    /// the first local header see the archive behind it. The ZIP library of
+    /// Android 5.0 to 8.0 read neither ZIP64 nor shifted offsets, so only the
+    /// classic layout reaches its package installer.
+    fn check_dex_prefix(&mut self, shift: u64, zip64: bool) {
+        if self.data.get(..4) != Some(&DEX_MAGIC[..]) {
+            return;
+        }
+        if shift == 0 && !zip64 {
+            self.archive(AnomalyKind::DexPrefix);
+        } else {
+            self.archive(AnomalyKind::DexPrefixRelocated);
+        }
     }
 
     /// Locates the APK Signing Block, which ends right before the central
