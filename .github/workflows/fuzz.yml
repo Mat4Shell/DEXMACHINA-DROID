@@ -38,7 +38,7 @@ jobs:
           - crate: droid-archive
             target: zip_archive
             dict: zip.dict
-            max_len: 70000
+            max_len: 140000
     env:
       CRATE: ${{ matrix.crate }}
       TARGET: ${{ matrix.target }}

@@ -7,7 +7,7 @@
 #![no_main]
 
 use droid_archive::Limits;
-use droid_archive::zip::{AnomalyKind, Component, ZipArchive};
+use droid_archive::zip::{AnomalyKind, Component, Impact, ZipArchive};
 use libfuzzer_sys::fuzz_target;
 
 const LIMITS: Limits = Limits {
@@ -38,9 +38,39 @@ fuzz_target!(|data: &[u8]| {
             assert!(dex_gap.is_none_or(|gap| gap == missing));
             dex_gap = Some(missing);
         }
+        if let AnomalyKind::NameLengthOverflow {
+            lib_prefix,
+            bc_suffix,
+        } = anomaly.kind
+        {
+            let index = anomaly
+                .entry
+                .expect("name length overflows name an entry");
+            let name = &entries[index].name;
+            assert_eq!(name.len(), usize::from(u16::MAX));
+            assert_eq!(lib_prefix, name.starts_with(b"lib/"));
+            assert_eq!(bc_suffix, name.ends_with(b".bc"));
+            assert!(lib_prefix || bc_suffix);
+            assert_eq!(anomaly.component, Some(Component::NativeLibraries));
+            assert_eq!(anomaly.impact(), Impact::Suspicious);
+            assert_eq!(anomaly.known_vulnerabilities(), ["CVE-2026-58995"]);
+            assert!(archive.entry_anomalies(index).all(|other| !matches!(
+                other.kind,
+                AnomalyKind::InvalidName
+                    | AnomalyKind::LocalHeaderMissing
+                    | AnomalyKind::LocalNameMismatch
+            )));
+        }
         if let Some(index) = anomaly.entry {
             let component = anomaly.component.expect("entry anomalies name a component");
-            assert!(component == entries[index].component || component == Component::JarSignature);
+            assert!(
+                component == entries[index].component
+                    || component == Component::JarSignature
+                    || matches!(anomaly.kind, AnomalyKind::NameLengthOverflow { .. })
+            );
+        }
+        for id in anomaly.known_vulnerabilities() {
+            assert!(id.starts_with("CVE-"));
         }
         assert!(!anomaly.code().is_empty());
         let _ = anomaly.to_string();

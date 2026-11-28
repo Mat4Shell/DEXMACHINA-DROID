@@ -192,13 +192,49 @@ pub enum AnomalyKind {
     /// The name is at least [`LONG_NAME_LEN`](super::LONG_NAME_LEN) bytes
     /// long, or one of its path components is longer than
     /// [`LONG_NAME_COMPONENT_LEN`](super::LONG_NAME_COMPONENT_LEN) bytes.
-    /// Android's native library installer skips such names, and no file system
+    /// Android's native library installer skips such names, except 65535-byte
+    /// names on devices without the fix for CVE-2026-58995 (see
+    /// [`NameLengthOverflow`](Self::NameLengthOverflow)), and no file system
     /// can hold them.
     LongName {
         /// Length of the name, in bytes.
         len: u64,
         /// Length of its longest path component, in bytes.
         longest_component: u64,
+    },
+    /// A 65535-byte name that crashes the native library installer of devices
+    /// without the Android 2026-11-01 security patch level: CVE-2026-58995.
+    ///
+    /// `ZipFileRO::getEntryFileName` stored the name length plus one in a
+    /// `uint16_t`, which wraps to 0 for the longest name a ZIP archive can
+    /// hold. The check against the caller's 4096-byte buffer then passes, and
+    /// `memcpy` receives a length of `SIZE_MAX`: it writes past the buffer
+    /// until it faults. The installer (`NativeLibraryHelper`, in
+    /// `system_server` during an installation) calls it on every entry that
+    /// the ZIP library returns for two scans, before looking at the rest of
+    /// the name: names that start with `lib/` (native libraries, scanned on
+    /// every device) and names that end with `.bc` (RenderScript bitcode,
+    /// scanned on 64-bit devices unless the manifest sets
+    /// `android:multiArch` or an ABI is forced). The fix computes the size as
+    /// a `size_t`, so patched devices skip the entry.
+    ///
+    /// Reported only when the ZIP library returns the entry to these scans:
+    /// a name that Android accepts, and a local header that agrees with the
+    /// central directory. The installation reaches the scans only if Android
+    /// opens the archive ([`android_accepts`](super::ZipArchive::android_accepts)).
+    /// Android 5.x scanned every entry, so that any 65535-byte name crashes
+    /// it; that behaviour is not modelled.
+    ///
+    /// The impact is [`Impact::Suspicious`], from the behaviour of a patched
+    /// Android: the installer skips the entry without failing, as it skips
+    /// every name of 4096 bytes or more, and the archive installs. The
+    /// vulnerability is carried by
+    /// [`known_vulnerabilities`](Self::known_vulnerabilities).
+    NameLengthOverflow {
+        /// The name starts with `lib/`.
+        lib_prefix: bool,
+        /// The name ends with `.bc`.
+        bc_suffix: bool,
     },
     /// The name contains a `..` path component.
     PathTraversal,
@@ -331,6 +367,7 @@ impl AnomalyKind {
             Self::NameNotStrictUtf8 => "zip.entry.name_not_utf8",
             Self::EmptyName => "zip.entry.empty_name",
             Self::LongName { .. } => "zip.entry.long_name",
+            Self::NameLengthOverflow { .. } => "zip.entry.name_length_overflow",
             Self::PathTraversal => "zip.entry.path_traversal",
             Self::AbsolutePath => "zip.entry.absolute_path",
             Self::Backslash => "zip.entry.backslash",
@@ -354,6 +391,18 @@ impl AnomalyKind {
             Self::DataDescriptorMismatch => "zip.entry.data_descriptor_mismatch",
             Self::DataDescriptorUnreadable => "zip.entry.data_descriptor_unreadable",
             Self::DeflateTrailingData { .. } => "zip.entry.deflate_trailing_data",
+        }
+    }
+
+    /// Known vulnerabilities of Android that the construction triggers on
+    /// devices without their fix, as CVE identifiers. Empty for most kinds.
+    ///
+    /// This is independent of the [impact](Self::impact_in), which describes
+    /// how an up-to-date Android reads the archive.
+    pub const fn known_vulnerabilities(&self) -> &'static [&'static str] {
+        match self {
+            Self::NameLengthOverflow { .. } => &["CVE-2026-58995"],
+            _ => &[],
         }
     }
 
@@ -423,6 +472,7 @@ impl AnomalyKind {
             | Self::SigningBlockMalformed
             | Self::EmptyName
             | Self::LongName { .. }
+            | Self::NameLengthOverflow { .. }
             | Self::PathTraversal
             | Self::AbsolutePath
             | Self::Backslash
@@ -510,6 +560,22 @@ impl fmt::Display for AnomalyKind {
                 f,
                 "name of {len} bytes, longest path component of {longest_component} bytes"
             ),
+            Self::NameLengthOverflow {
+                lib_prefix,
+                bc_suffix,
+            } => {
+                let scans = match (lib_prefix, bc_suffix) {
+                    (true, true) => "lib/ and .bc scans",
+                    (true, false) => "lib/ scan",
+                    _ => ".bc scan",
+                };
+                write!(
+                    f,
+                    "65535-byte name overflows the name copy of the native library \
+                     installer ({scans}) on Android before the 2026-11-01 security \
+                     patch level (CVE-2026-58995)"
+                )
+            }
             Self::PathTraversal => f.write_str("name contains a `..` component"),
             Self::AbsolutePath => f.write_str("name is an absolute path"),
             Self::Backslash => f.write_str("name contains a backslash"),
@@ -587,8 +653,10 @@ pub struct Anomaly {
     /// The Android component whose reaction [`impact`](Self::impact)
     /// describes. For an entry, it is the component that reads that kind of
     /// entry; when another component reacts differently, the anomaly is
-    /// reported once more for it. `None` stands for the ZIP library shared by
-    /// all components.
+    /// reported once more for it. A component that scans entry names can also
+    /// be named for an entry it does not read, as the native library installer
+    /// is for [`AnomalyKind::NameLengthOverflow`]. `None` stands for the ZIP
+    /// library shared by all components.
     pub component: Option<Component>,
 }
 
@@ -620,6 +688,12 @@ impl Anomaly {
     /// Stable identifier of the anomaly kind.
     pub const fn code(&self) -> &'static str {
         self.kind.code()
+    }
+
+    /// Known vulnerabilities that the anomaly's construction triggers, as CVE
+    /// identifiers: see [`AnomalyKind::known_vulnerabilities`].
+    pub const fn known_vulnerabilities(&self) -> &'static [&'static str] {
+        self.kind.known_vulnerabilities()
     }
 
     /// What the anomaly means for an Android device, as seen by

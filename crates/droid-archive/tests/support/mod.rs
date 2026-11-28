@@ -266,6 +266,15 @@ impl ZipBuilder {
     }
 }
 
+/// A name of exactly `len` bytes, made of `prefix`, padding and `suffix`.
+pub fn padded_name(prefix: &str, suffix: &str, len: usize) -> String {
+    let padding = len
+        .checked_sub(prefix.len())
+        .and_then(|rest| rest.checked_sub(suffix.len()))
+        .unwrap();
+    format!("{prefix}{}{suffix}", "x".repeat(padding))
+}
+
 /// A small valid archive: a stored manifest, a deflated DEX, and two entries
 /// with data descriptors, one of them empty.
 pub fn sample() -> ZipBuilder {
