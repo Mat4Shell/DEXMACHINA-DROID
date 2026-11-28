@@ -36,6 +36,17 @@ pub fn all() -> Vec<(&'static str, Vec<u8>)> {
     shifted.offsets_include_prefix = false;
     seeds.push(("prefix-shifted.zip", shifted.build()));
 
+    for (name, offsets_include_prefix) in [
+        ("prefix-dex-adjusted.zip", true),
+        ("prefix-dex-shifted.zip", false),
+    ] {
+        let mut dex = sample();
+        dex.prefix = b"dex\n035\0".to_vec();
+        dex.prefix.resize(0x70, 0);
+        dex.offsets_include_prefix = offsets_include_prefix;
+        seeds.push((name, dex.build()));
+    }
+
     let mut decoy = sample();
     decoy.prefix = ZipBuilder::new()
         .entry(EntrySpec::stored("AndroidManifest.xml", b"decoy"))

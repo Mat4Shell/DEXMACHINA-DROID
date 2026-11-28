@@ -6,6 +6,8 @@
 
 #![no_main]
 
+use std::collections::HashMap;
+
 use droid_archive::Limits;
 use droid_archive::zip::{AnomalyKind, Component, Impact, ZipArchive};
 use libfuzzer_sys::fuzz_target;
@@ -28,7 +30,43 @@ fuzz_target!(|data: &[u8]| {
     assert!(entries.len() as u64 <= LIMITS.max_entries);
     assert!(archive.layout().central_directory_size <= LIMITS.max_central_directory_size);
     let mut dex_gap = None;
+    let mut duplicates: Vec<Option<usize>> = vec![None; entries.len()];
+    let mut dex_prefixes = 0usize;
     for anomaly in archive.anomalies() {
+        let expected_vulnerabilities: &[&str] = match anomaly.kind {
+            AnomalyKind::DuplicateName { .. } => &["CVE-2013-4787"],
+            AnomalyKind::DexPrefix => &["CVE-2017-13156", "CVE-2024-40673"],
+            AnomalyKind::DexPrefixRelocated => &["CVE-2024-40673"],
+            AnomalyKind::NameLengthOverflow { .. } => &["CVE-2026-58995"],
+            _ => &[],
+        };
+        assert_eq!(anomaly.known_vulnerabilities(), expected_vulnerabilities);
+        if let AnomalyKind::DuplicateName { first } = anomaly.kind {
+            let index = anomaly.entry.expect("duplicate names name an entry");
+            assert!(first < index);
+            assert_eq!(entries[first].name, entries[index].name);
+            assert_eq!(anomaly.impact(), Impact::ArchiveRejected);
+            assert!(duplicates[index].replace(first).is_none());
+        }
+        if matches!(
+            anomaly.kind,
+            AnomalyKind::DexPrefix | AnomalyKind::DexPrefixRelocated
+        ) {
+            assert!(data.starts_with(b"dex\n"));
+            assert_eq!(anomaly.entry, None);
+            assert_eq!(anomaly.component, None);
+            assert_eq!(anomaly.impact(), Impact::ArchiveRejected);
+            let layout = archive.layout();
+            let classic = layout.offset_shift == 0 && layout.zip64_eocd_offset.is_none();
+            assert_eq!(classic, anomaly.kind == AnomalyKind::DexPrefix);
+            assert!(
+                archive
+                    .anomalies()
+                    .iter()
+                    .any(|other| matches!(other.kind, AnomalyKind::PrefixData { .. }))
+            );
+            dex_prefixes += 1;
+        }
         assert!(anomaly.entry.is_none_or(|index| index < entries.len()));
         if let AnomalyKind::DexUnreachable { missing } = anomaly.kind {
             let index = anomaly
@@ -43,9 +81,7 @@ fuzz_target!(|data: &[u8]| {
             bc_suffix,
         } = anomaly.kind
         {
-            let index = anomaly
-                .entry
-                .expect("name length overflows name an entry");
+            let index = anomaly.entry.expect("name length overflows name an entry");
             let name = &entries[index].name;
             assert_eq!(name.len(), usize::from(u16::MAX));
             assert_eq!(lib_prefix, name.starts_with(b"lib/"));
@@ -75,6 +111,14 @@ fuzz_target!(|data: &[u8]| {
         assert!(!anomaly.code().is_empty());
         let _ = anomaly.to_string();
     }
+    let mut first_of: HashMap<&[u8], usize> = HashMap::new();
+    for entry in entries {
+        let first = *first_of.entry(entry.name.as_slice()).or_insert(entry.index);
+        let expected = (first != entry.index).then_some(first);
+        assert_eq!(duplicates[entry.index], expected);
+    }
+    let expected_prefixes = archive.layout().declared_entries > 0 && data.starts_with(b"dex\n");
+    assert_eq!(dex_prefixes, usize::from(expected_prefixes));
     if let Some(missing) = dex_gap {
         let name = match missing {
             1 => "classes.dex".to_string(),
